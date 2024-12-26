@@ -50,6 +50,11 @@ def create_users_table():
         cursor.close()
         conn.close()
 
+     subject = "Welcome to RealOneInvest!"
+        body = f"Hello {first_name} {last_name},\n\nThank you for signing up with RealOneInvest! We’re excited to have you on board.\n\nBest regards,\nThe RealOneInvest Team"
+        send_email(email, subject, body)
+
+
     except (Exception, psycopg2.Error) as error:
         print(f"Error while creating or updating the table: {error}")
 
