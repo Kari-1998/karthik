@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import uuid
+import euid
 import random
 import time
 from twilio.rest import Client
