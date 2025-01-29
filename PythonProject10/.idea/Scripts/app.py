@@ -1,147 +1,189 @@
 import os
-import re
-import psycopg2
-from psycopg2 import sql
-from flask import Flask, request, jsonify
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import uuid
 import random
-from functools import wraps
+import datetime
+import psycopg2
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from twilio.rest import Client
+from dotenv import load_dotenv
 
-# Define the database connection parameters
+# Load environment variables
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app)
+
+# JWT Configuration
+app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = datetime.timedelta(minutes=15)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = datetime.timedelta(days=7)
+jwt = JWTManager(app)
+
+# Twilio Configuration
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# Database Connection
 def get_connection():
     return psycopg2.connect(
-        dbname="realoneinvest",
-        user="karthik1",
-        password="Info123tech",
-        host="localhost",
-        port="5433"
+        dbname=os.getenv("DATABASE_NAME"),
+        user=os.getenv("DATABASE_USER"),
+        password=os.getenv("DATABASE_PASSWORD"),
+        host=os.getenv("DATABASE_HOST"),
+        port=os.getenv("DATABASE_PORT")
     )
 
-# Function to create or update the users table (removed general_admins table)
-def create_tables():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
+# Helper Functions
+def generate_otp():
+    return str(random.randint(100000, 999999))
 
-        # Create the users table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS Users (
-            investor_id VARCHAR(20) Unique,
-            euid UUID,
-            first_name VARCHAR(100) NOT NULL,
-            last_name VARCHAR(100) NOT NULL,
-            email VARCHAR(100) NOT NULL UNIQUE,
-            password VARCHAR(100) NOT NULL,
-            phone_number VARCHAR(15),
-            address TEXT,
-            reset_token VARCHAR(255),
-            otp VARCHAR(6),
-            otp_expiry TIMESTAMP,
-            PRIMARY KEY (euid)
-        );
-        """)
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-        print("Users table created successfully.")
-
-    except (Exception, psycopg2.Error) as error:
-        print(f"Error creating tables: {error}")
-
-# Initialize Flask app
-app = Flask(__name__)
-
-# Email validation
-def is_valid_email(email):
-    return re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email) is not None
-
-# Phone number validation
-def is_valid_phone_number(phone_number):
-    return phone_number.isdigit() and len(phone_number) == 10
-
-# Generate unique IDs
-def generate_investor_id():
-    return f"I{random.randint(1000, 9999)}"
-
-def generate_euid():
-    return str(uuid.uuid4())
-
-# Function to send email
 def send_email(to_email, subject, body):
-    EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS', 'pothi9940@gmail.com')
-    APP_PASSWORD = os.getenv('APP_PASSWORD', 'vive mscg vola ajso')
-
     try:
-        message = MIMEMultipart()
-        message['From'] = EMAIL_ADDRESS
-        message['To'] = to_email
-        message['Subject'] = subject
-        message.attach(MIMEText(body, 'plain'))
+        message = Mail(
+            from_email=os.getenv("SENDGRID_EMAIL"),
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body
+        )
+        sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+        response = sg.send(message)
+        print(f"✅ Email sent to {to_email}. Status Code: {response.status_code}")
 
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(EMAIL_ADDRESS, APP_PASSWORD)
-        server.sendmail(EMAIL_ADDRESS, to_email, message.as_string())
-        print(f"Email sent successfully to {to_email}")
-        server.quit()
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"❌ Error sending email to {to_email}: {e}")
 
-# API endpoint to store user data
+def send_sms(phone_number, otp):
+    try:
+        message = twilio_client.messages.create(
+            body=f"Your OTP for phone verification is: {otp}",
+            from_=TWILIO_PHONE_NUMBER,
+            to=phone_number
+        )
+        print(f"✅ SMS sent to {phone_number}. SID: {message.sid}")
+    except Exception as e:
+        print(f"❌ Error sending SMS to {phone_number}: {e}")
+
+# API Routes
+
 @app.route('/api/signup', methods=['POST'])
-def store_user():
+def signup_user():
     try:
         data = request.get_json()
-
-        first_name = data.get('first_name')
-        last_name = data.get('last_name')
-        email = data.get('email')
-        password = data.get('password')
-        reenter_password = data.get('reenter_password')
-        phone_number = data.get('phone_number')
-        address = data.get('address')
-
-        if not (first_name and last_name and email and password and reenter_password):
-            return jsonify({"error": "All required fields must be provided."}), 400
-
-        if not is_valid_email(email):
-            return jsonify({"error": "Invalid email format."}), 400
-
-        if not is_valid_phone_number(phone_number):
-            return jsonify({"error": "Phone number must be exactly 10 digits."}), 400
+        first_name = data['first_name']
+        last_name = data['last_name']
+        email = data['email']
+        phone_number = data['phone_number']
+        password = data['password']
+        reenter_password = data['reenter_password']
 
         if password != reenter_password:
-            return jsonify({"error": "Passwords do not match."}), 400
+            return jsonify({"error": "Passwords do not match"}), 400
 
-        investor_id = generate_investor_id()
-        euid = generate_euid()
+        hashed_password = generate_password_hash(password)
+        email_otp = generate_otp()
+        email_otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=5)
 
         conn = get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
-        INSERT INTO users (investor_id, euid, first_name, last_name, email, password, phone_number, address)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (investor_id, euid, first_name, last_name, email, password, phone_number, address))
+        INSERT INTO users (first_name, last_name, email, phone_number, password, email_otp, email_otp_expiry)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (first_name, last_name, email, phone_number, hashed_password, email_otp, email_otp_expiry))
+
         conn.commit()
         cursor.close()
         conn.close()
 
-        subject = "Welcome to RealOneInvest!"
-        body = f"Hello {first_name},\n\nThank you for signing up with RealOneInvest!"
-        send_email(email, subject, body)
+        send_email(email, "Verify Your Email - Real One Invest", f"Your OTP: {email_otp}")
 
-        return jsonify({"message": "User registered successfully."}), 201
+        return jsonify({"message": "Signup successful. Please verify your email."}), 201
 
-    except (Exception, psycopg2.Error) as error:
-        print(f"Error storing user data: {error}")
-        return jsonify({"error": "Failed to store user data."}), 500
+    except Exception as e:
+        return jsonify({"error": f"Signup failed: {str(e)}"}), 500
 
-# Run the app
+@app.route('/api/verify-email', methods=['POST'])
+def verify_email():
+    try:
+        data = request.get_json()
+        email = data['email']
+        email_otp = data['otp']
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT email_otp FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+
+        if not user or user[0] != email_otp:
+            return jsonify({"error": "Invalid OTP"}), 400
+
+        cursor.execute("UPDATE users SET email_verified = TRUE WHERE email = %s", (email,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({"message": "Email verified successfully."}), 200
+
+    except Exception as e:
+        return jsonify({"error": "Email verification failed"}), 500
+
+@app.route('/api/send-phone-otp', methods=['POST'])
+def send_phone_otp():
+    try:
+        data = request.get_json()
+        email = data['email']
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT phone_number FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        phone_number = user[0]
+        phone_otp = generate_otp()
+        cursor.execute("UPDATE users SET phone_otp = %s WHERE email = %s", (phone_otp, email))
+        conn.commit()
+
+        send_sms(phone_number, phone_otp)
+
+        return jsonify({"message": "Phone OTP sent successfully."}), 200
+
+    except Exception as e:
+        return jsonify({"error": "Failed to send phone OTP"}), 500
+
+@app.route('/api/verify-phone', methods=['POST'])
+def verify_phone():
+    try:
+        data = request.get_json()
+        email = data['email']
+        phone_otp = data['otp']
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT phone_otp FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+
+        if not user or user[0] != phone_otp:
+            return jsonify({"error": "Invalid OTP"}), 400
+
+        cursor.execute("UPDATE users SET phone_verified = TRUE WHERE email = %s", (email,))
+        conn.commit()
+        return jsonify({"message": "Phone verified successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"error": "Phone verification failed"}), 500
+
+# Run Flask App
 if __name__ == '__main__':
-    create_tables()
     app.run(debug=True, host="0.0.0.0", port=5000)
