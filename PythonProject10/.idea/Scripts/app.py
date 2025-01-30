@@ -46,6 +46,9 @@ def get_connection():
 def generate_otp():
     return str(random.randint(100000, 999999))
 
+def generate_investor_id():
+    return f"I{random.randint(1000, 9999)}"
+
 def send_email(to_email, subject, body):
     try:
         message = Mail(
@@ -57,7 +60,6 @@ def send_email(to_email, subject, body):
         sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
         response = sg.send(message)
         print(f"✅ Email sent to {to_email}. Status Code: {response.status_code}")
-
     except Exception as e:
         print(f"❌ Error sending email to {to_email}: {e}")
 
@@ -73,7 +75,6 @@ def send_sms(phone_number, otp):
         print(f"❌ Error sending SMS to {phone_number}: {e}")
 
 # API Routes
-
 @app.route('/api/signup', methods=['POST'])
 def signup_user():
     try:
@@ -84,6 +85,7 @@ def signup_user():
         phone_number = data['phone_number']
         password = data['password']
         reenter_password = data['reenter_password']
+        interested_in = data['interested_in']
 
         if password != reenter_password:
             return jsonify({"error": "Passwords do not match"}), 400
@@ -96,9 +98,9 @@ def signup_user():
         cursor = conn.cursor()
 
         cursor.execute("""
-        INSERT INTO users (first_name, last_name, email, phone_number, password, email_otp, email_otp_expiry)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (first_name, last_name, email, phone_number, hashed_password, email_otp, email_otp_expiry))
+        INSERT INTO users (first_name, last_name, email, phone_number, password, email_otp, email_otp_expiry, email_verified, phone_verified, investor_id, interested_in)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, FALSE, NULL, %s)
+        """, (first_name, last_name, email, phone_number, hashed_password, email_otp, email_otp_expiry, interested_in))
 
         conn.commit()
         cursor.close()
@@ -107,7 +109,6 @@ def signup_user():
         send_email(email, "Verify Your Email - Real One Invest", f"Your OTP: {email_otp}")
 
         return jsonify({"message": "Signup successful. Please verify your email."}), 201
-
     except Exception as e:
         return jsonify({"error": f"Signup failed: {str(e)}"}), 500
 
@@ -132,7 +133,6 @@ def verify_email():
         conn.close()
 
         return jsonify({"message": "Email verified successfully."}), 200
-
     except Exception as e:
         return jsonify({"error": "Email verification failed"}), 500
 
@@ -177,13 +177,16 @@ def verify_phone():
         if not user or user[0] != phone_otp:
             return jsonify({"error": "Invalid OTP"}), 400
 
-        cursor.execute("UPDATE users SET phone_verified = TRUE WHERE email = %s", (email,))
-        conn.commit()
-        return jsonify({"message": "Phone verified successfully"}), 200
+        investor_id = generate_investor_id()
 
+        cursor.execute("UPDATE users SET phone_verified = TRUE, investor_id = %s WHERE email = %s", (investor_id, email))
+        conn.commit()
+
+        send_email(email, "Welcome to Real One Invest!", f"Thank you for signing up!\nYour Investor ID is {investor_id}. Welcome to Real One Invest!")
+
+        return jsonify({"message": "Phone verified successfully. Welcome email sent!", "investor_id": investor_id}), 200
     except Exception as e:
         return jsonify({"error": "Phone verification failed"}), 500
 
-# Run Flask App
 if __name__ == '__main__':
     app.run(debug=True, host="0.0.0.0", port=5000)
