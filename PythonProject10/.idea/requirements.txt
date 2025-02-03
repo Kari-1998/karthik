@@ -1,0 +1,10 @@
+Flask
+flask-cors
+flask-jwt-extended
+psycopg2
+sendgrid
+twilio
+python-dotenv
+werkzeug
+smtplib
+ssl
